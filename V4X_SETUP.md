@@ -4,7 +4,7 @@ This branch adds a restricted, remote-capable MCP server for the existing V4X Wi
 
 ## Safety model
 
-- Only pages at `WIKIJS_ALLOWED_PATH_PREFIX` or below it are exposed.
+- This deployment is authorized for all pages in the dedicated V4X Wiki.js instance. Delete and administration operations remain unavailable.
 - No delete or bulk mutation tools are registered.
 - Updates require the page's current `updatedAt` value to prevent stale overwrites.
 - The Wiki.js API key remains on the VPS.
@@ -31,7 +31,7 @@ Edit `.env.v4x` on the VPS and set:
 
 - `WIKIJS_API_URL`: URL reachable from the MCP container.
 - `WIKIJS_API_KEY`: API key created in Wiki.js Administration > API Access.
-- `WIKIJS_ALLOWED_PATH_PREFIX`: the actual Wiki.js path containing V4X pages.
+- `WIKIJS_ALLOWED_PATH_PREFIXES`: use `*` for this dedicated V4X Wiki; comma-separated prefixes can be used later if narrower access is desired.
 - `WIKIJS_DEFAULT_LOCALE`: the locale code used by those pages.
 
 Start the MCP service:
@@ -68,7 +68,7 @@ After the tunnel is available:
 ## Initial checks
 
 1. Call `wikijs_connection_status`.
-2. Call `wikijs_list_pages` and verify that no paths outside V4X are returned.
+2. Call `wikijs_list_pages` and verify that the dedicated V4X Wiki pages are returned.
 3. Read one known page.
 4. Create a disposable page below the allowed prefix.
 5. Update it using its returned/current `updatedAt`.
