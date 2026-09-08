@@ -135,9 +135,8 @@ async def wikijs_connection_status() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
-async def wikijs_list_pages() -> list[dict[str, Any]]:
-    """List page metadata under the configured V4X path only."""
+async def list_pages() -> list[dict[str, Any]]:
+    """Fetch page metadata under the configured V4X path."""
     query = """
     query {
       pages {
@@ -153,6 +152,12 @@ async def wikijs_list_pages() -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+async def wikijs_list_pages() -> list[dict[str, Any]]:
+    """List page metadata under the configured V4X path only."""
+    return await list_pages()
+
+
+@mcp.tool()
 async def wikijs_search_pages(query: str) -> list[dict[str, Any]]:
     """Search V4X page titles, paths, descriptions, and content."""
     term = query.strip().casefold()
@@ -160,7 +165,7 @@ async def wikijs_search_pages(query: str) -> list[dict[str, Any]]:
         return []
 
     matches: list[dict[str, Any]] = []
-    for metadata in await wikijs_list_pages():
+    for metadata in await list_pages():
         page = await get_page_by_path(metadata["path"], metadata.get("locale"))
         haystack = "\n".join(
             str(page.get(key, "")) for key in ("title", "path", "description", "content")
@@ -392,7 +397,7 @@ async def plan_page_tree_move(
     if destination.startswith(source + "/"):
         raise ValueError("A page tree cannot be moved inside itself.")
 
-    all_pages = await wikijs_list_pages()
+    all_pages = await list_pages()
     locale_pages = [
         page for page in all_pages if page.get("locale") == locale
     ]
@@ -455,7 +460,7 @@ async def wikijs_move_page(
             "The page changed after it was read. Read it again before moving."
         )
 
-    pages = await wikijs_list_pages()
+    pages = await list_pages()
     if any(
         item.get("locale") == page_locale
         and item.get("path") == destination
