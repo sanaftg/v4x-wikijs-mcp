@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     WIKIJS_API_URL: str = "http://host.docker.internal:3000"
     WIKIJS_API_KEY: str
-    WIKIJS_ALLOWED_PATH_PREFIX: str = "v4x"
+    WIKIJS_ALLOWED_PATH_PREFIXES: str = "*"
     WIKIJS_DEFAULT_LOCALE: str = "ja"
     MCP_HOST: str = "0.0.0.0"
     MCP_PORT: int = 8000
@@ -42,15 +42,32 @@ def normalize_path(path: str) -> str:
     return path.strip().strip("/")
 
 
-def allowed_prefix() -> str:
-    return normalize_path(settings.WIKIJS_ALLOWED_PATH_PREFIX)
+def allowed_prefixes() -> tuple[str, ...]:
+    values = tuple(
+        normalize_path(value)
+        for value in settings.WIKIJS_ALLOWED_PATH_PREFIXES.split(",")
+        if value.strip()
+    )
+    return values or ("*",)
+
+
+def is_allowed_path(path: str) -> bool:
+    normalized = normalize_path(path)
+    if not normalized:
+        return False
+    prefixes = allowed_prefixes()
+    return "*" in prefixes or any(
+        normalized == prefix or normalized.startswith(prefix + "/")
+        for prefix in prefixes
+    )
 
 
 def require_allowed_path(path: str) -> str:
     normalized = normalize_path(path)
-    prefix = allowed_prefix()
-    if not normalized or (normalized != prefix and not normalized.startswith(prefix + "/")):
-        raise ValueError(f"Page path must be '{prefix}' or below '{prefix}/'.")
+    if not is_allowed_path(normalized):
+        raise ValueError(
+            f"Page path is outside the allowed Wiki.js paths: {allowed_prefixes()}."
+        )
     return normalized
 
 
@@ -113,7 +130,7 @@ async def wikijs_connection_status() -> dict[str, Any]:
     return {
         "connected": True,
         "accessiblePageCount": len(data.get("pages", {}).get("list", [])),
-        "allowedPathPrefix": allowed_prefix(),
+        "allowedPathPrefixes": list(allowed_prefixes()),
         "defaultLocale": settings.WIKIJS_DEFAULT_LOCALE,
     }
 
@@ -131,13 +148,8 @@ async def wikijs_list_pages() -> list[dict[str, Any]]:
     }
     """
     data = await wiki.request(query)
-    prefix = allowed_prefix()
     pages = data.get("pages", {}).get("list", [])
-    return [
-        page for page in pages
-        if normalize_path(page.get("path", "")) == prefix
-        or normalize_path(page.get("path", "")).startswith(prefix + "/")
-    ]
+    return [page for page in pages if is_allowed_path(page.get("path", ""))]
 
 
 @mcp.tool()
@@ -182,8 +194,13 @@ async def wikijs_create_page(
     is_private: bool = True,
 ) -> dict[str, Any]:
     """Create a Markdown page under the V4X path. This is a write action."""
-    prefix = allowed_prefix()
-    requested_path = path or f"{prefix}/{slugify(title)}"
+    prefixes = allowed_prefixes()
+    if path:
+        requested_path = path
+    elif "*" in prefixes:
+        requested_path = slugify(title)
+    else:
+        requested_path = f"{prefixes[0]}/{slugify(title)}"
     safe_path = require_allowed_path(requested_path)
     page_locale = locale or settings.WIKIJS_DEFAULT_LOCALE
 
@@ -291,6 +308,6 @@ if __name__ == "__main__":
         "Starting V4X Wiki.js MCP on %s:%s for path %s",
         settings.MCP_HOST,
         settings.MCP_PORT,
-        allowed_prefix(),
+        allowed_prefixes(),
     )
     mcp.run(transport="http", host=settings.MCP_HOST, port=settings.MCP_PORT)
