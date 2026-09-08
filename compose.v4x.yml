@@ -1,0 +1,12 @@
+services:
+  v4x-wikijs-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.v4x
+    restart: unless-stopped
+    env_file:
+      - .env.v4x
+    ports:
+      - "127.0.0.1:8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

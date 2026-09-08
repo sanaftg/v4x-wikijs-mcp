@@ -1,0 +1,4 @@
+fastmcp>=2.12,<3
+httpx>=0.27,<1
+pydantic-settings>=2,<3
+python-slugify>=8,<9

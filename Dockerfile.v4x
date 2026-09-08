@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements-v4x.txt .
+RUN pip install --no-cache-dir -r requirements-v4x.txt
+
+COPY src/v4x_wikijs_mcp.py ./src/v4x_wikijs_mcp.py
+
+RUN useradd --create-home --uid 10001 mcpuser
+USER mcpuser
+
+EXPOSE 8000
+
+CMD ["python", "src/v4x_wikijs_mcp.py"]
