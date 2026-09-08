@@ -48,7 +48,7 @@ async def test_plan_page_tree_move_orders_descendants_first(monkeypatch):
             },
         ]
 
-    monkeypatch.setattr(server, "wikijs_list_pages", fake_list_pages)
+    monkeypatch.setattr(server, "list_pages", fake_list_pages)
 
     plan = await server.plan_page_tree_move(
         "開発環境",
@@ -86,7 +86,7 @@ async def test_plan_page_tree_move_rejects_existing_destination(monkeypatch):
             },
         ]
 
-    monkeypatch.setattr(server, "wikijs_list_pages", fake_list_pages)
+    monkeypatch.setattr(server, "list_pages", fake_list_pages)
 
     with pytest.raises(ValueError, match="Destination page already exists"):
         await server.plan_page_tree_move(
@@ -101,7 +101,7 @@ async def test_plan_page_tree_move_rejects_moving_inside_itself(monkeypatch):
     async def fake_list_pages():
         return []
 
-    monkeypatch.setattr(server, "wikijs_list_pages", fake_list_pages)
+    monkeypatch.setattr(server, "list_pages", fake_list_pages)
 
     with pytest.raises(ValueError, match="inside itself"):
         await server.plan_page_tree_move(
