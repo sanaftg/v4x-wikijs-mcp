@@ -108,11 +108,11 @@ async def get_page_by_path(path: str, locale: str | None = None) -> dict[str, An
 @mcp.tool()
 async def wikijs_connection_status() -> dict[str, Any]:
     """Check whether the restricted MCP server can reach Wiki.js."""
-    query = "query { system { info { currentVersion } } }"
+    query = "query { pages { list { id path } } }"
     data = await wiki.request(query)
     return {
         "connected": True,
-        "wikiVersion": data.get("system", {}).get("info", {}).get("currentVersion"),
+        "accessiblePageCount": len(data.get("pages", {}).get("list", [])),
         "allowedPathPrefix": allowed_prefix(),
         "defaultLocale": settings.WIKIJS_DEFAULT_LOCALE,
     }
