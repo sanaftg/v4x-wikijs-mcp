@@ -5,8 +5,9 @@ This branch adds a restricted, remote-capable MCP server for the existing V4X Wi
 ## Safety model
 
 - This deployment is authorized for all pages in the dedicated V4X Wiki.js instance. Delete and administration operations remain unavailable.
-- No delete or bulk mutation tools are registered.
-- Updates require the page's current `updatedAt` value to prevent stale overwrites.
+- Delete tools remain unavailable. Tree moves are available only with an explicit `dry_run=false` execution.
+- Updates and single-page moves require the page's current `updatedAt` value to prevent stale overwrites.
+- Tree moves take an `updatedAt` snapshot during planning and stop at the first concurrent-edit failure.
 - The Wiki.js API key remains on the VPS.
 - The Docker service publishes only to `127.0.0.1`; do not expose port 8000 directly.
 
@@ -18,6 +19,8 @@ This branch adds a restricted, remote-capable MCP server for the existing V4X Wi
 - `wikijs_get_page`
 - `wikijs_create_page`
 - `wikijs_update_page`
+- `wikijs_move_page`（既定は `dry_run=true`）
+- `wikijs_move_page_tree`（既定は `dry_run=true`）
 
 ## VPS setup
 
@@ -73,3 +76,22 @@ After the tunnel is available:
 4. Create a disposable page below the allowed prefix.
 5. Update it using its returned/current `updatedAt`.
 6. Delete the disposable page manually in Wiki.js.
+
+
+## Moving pages
+
+Preview a single-page move first:
+
+```text
+wikijs_move_page(
+  source_path="開発環境",
+  destination_path="開発/開発環境",
+  expected_updated_at="<current updatedAt>"
+)
+```
+
+After reviewing the returned plan, run the same request with `dry_run=false`.
+
+To move a parent page and every descendant, use `wikijs_move_page_tree`. It validates all destination paths and conflicts before writing, processes deeper descendants first, and stops on the first failure. The result reports `moved`, `failed`, and `remaining` pages so a partial move can be recovered safely.
+
+Neither move tool rewrites links embedded in Markdown. Review navigation pages and internal links after moving a tree.
