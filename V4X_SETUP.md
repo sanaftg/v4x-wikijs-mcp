@@ -4,10 +4,11 @@ This branch adds a restricted, remote-capable MCP server for the existing V4X Wi
 
 ## Safety model
 
-- This deployment is authorized for all pages in the dedicated V4X Wiki.js instance. Delete and administration operations remain unavailable.
+- This deployment is authorized for all pages and site navigation in the dedicated V4X Wiki.js instance. Delete and unrelated administration operations remain unavailable.
 - Delete tools remain unavailable. Tree moves are available only with an explicit `dry_run=false` execution.
 - Updates and single-page moves require the page's current `updatedAt` value to prevent stale overwrites.
 - Tree moves take an `updatedAt` snapshot during planning and stop at the first concurrent-edit failure.
+- Navigation updates require the version returned by `wikijs_get_navigation`, and default to preview-only mode.
 - The Wiki.js API key remains on the VPS.
 - The Docker service publishes only to `127.0.0.1`; do not expose port 8000 directly.
 
@@ -21,6 +22,8 @@ This branch adds a restricted, remote-capable MCP server for the existing V4X Wi
 - `wikijs_update_page`
 - `wikijs_move_page`（既定は `dry_run=true`）
 - `wikijs_move_page_tree`（既定は `dry_run=true`）
+- `wikijs_get_navigation`
+- `wikijs_update_navigation`（既定は `dry_run=true`）
 
 ## VPS setup
 
@@ -65,7 +68,7 @@ After the tunnel is available:
 1. Enable Developer mode in ChatGPT.
 2. Open ChatGPT Plugins and select the plus button.
 3. Choose Tunnel and enter/select the tunnel ID.
-4. Review the six advertised tools.
+4. Review the advertised tools.
 5. Test read-only prompts before trying a create or update.
 
 ## Initial checks
@@ -95,3 +98,24 @@ After reviewing the returned plan, run the same request with `dry_run=false`.
 To move a parent page and every descendant, use `wikijs_move_page_tree`. It validates all destination paths and conflicts before writing, processes deeper descendants first, and stops on the first failure. The result reports `moved`, `failed`, and `remaining` pages so a partial move can be recovered safely.
 
 Neither move tool rewrites links embedded in Markdown. Review navigation pages and internal links after moving a tree.
+
+## Navigation
+
+Read the current mode and locale-specific static navigation first:
+
+```text
+wikijs_get_navigation(locale="ja")
+```
+
+The result contains a `version` value. Pass that value and the complete replacement item list to `wikijs_update_navigation`. The tool preserves every other locale, validates item IDs, kinds, visibility settings, and page targets, and returns a preview by default.
+
+```text
+wikijs_update_navigation(
+  locale="ja",
+  mode="STATIC",
+  items=[...],
+  expected_version="<version from wikijs_get_navigation>"
+)
+```
+
+After reviewing the returned items and mode change, repeat with `dry_run=false`. If another administrator changed navigation in the meantime, the version check rejects the stale update.
