@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastmcp import FastMCP
@@ -75,7 +78,9 @@ class WikiJSClient:
     def __init__(self) -> None:
         self.url = settings.WIKIJS_API_URL.rstrip("/") + "/graphql"
 
-    async def request(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def request(
+        self, query: str, variables: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {settings.WIKIJS_API_KEY}",
             "Content-Type": "application/json",
@@ -90,12 +95,271 @@ class WikiJSClient:
             payload = response.json()
 
         if payload.get("errors"):
-            messages = "; ".join(error.get("message", str(error)) for error in payload["errors"])
+            messages = "; ".join(
+                error.get("message", str(error)) for error in payload["errors"]
+            )
             raise RuntimeError(f"Wiki.js GraphQL error: {messages}")
         return payload.get("data", {})
 
 
 wiki = WikiJSClient()
+
+NAVIGATION_MODES = {"NONE", "TREE", "MIXED", "STATIC"}
+NAVIGATION_ITEM_KINDS = {"link", "header", "divider"}
+NAVIGATION_TARGET_TYPES = {"external", "externalblank", "home", "page"}
+
+
+async def get_navigation_state() -> dict[str, Any]:
+    """Fetch the complete navigation configuration used for concurrency checks."""
+    query = """
+    query {
+      navigation {
+        config { mode }
+        tree {
+          locale
+          items {
+            id kind label icon targetType target visibilityMode visibilityGroups
+          }
+        }
+      }
+    }
+    """
+    navigation = (await wiki.request(query)).get("navigation", {})
+    mode = navigation.get("config", {}).get("mode")
+    if mode not in NAVIGATION_MODES:
+        raise RuntimeError(f"Wiki.js returned an unsupported navigation mode: {mode}")
+    trees = navigation.get("tree", [])
+    return {"mode": mode, "trees": trees}
+
+
+def navigation_version(state: dict[str, Any]) -> str:
+    """Create a stable optimistic-concurrency token for a navigation snapshot."""
+    canonical = json.dumps(
+        state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def normalize_navigation_item(item: dict[str, Any], locale: str) -> dict[str, Any]:
+    """Validate and normalize one Wiki.js static-navigation item."""
+    item_id = str(item.get("id", "")).strip()
+    if not item_id:
+        raise ValueError("Every navigation item must have a non-empty id.")
+
+    kind = str(item.get("kind", "")).strip().lower()
+    if kind not in NAVIGATION_ITEM_KINDS:
+        raise ValueError(
+            f"Navigation item {item_id} has unsupported kind: {kind or '<empty>'}."
+        )
+
+    visibility_mode = str(item.get("visibilityMode", "all")).strip().lower()
+    if visibility_mode not in {"all", "restricted"}:
+        raise ValueError(
+            f"Navigation item {item_id} has unsupported visibilityMode: "
+            f"{visibility_mode or '<empty>'}."
+        )
+    visibility_groups = item.get("visibilityGroups") or []
+    if not isinstance(visibility_groups, list) or any(
+        not isinstance(group_id, int) or isinstance(group_id, bool)
+        for group_id in visibility_groups
+    ):
+        raise ValueError(
+            f"Navigation item {item_id} visibilityGroups must contain integer group IDs."
+        )
+    if visibility_mode == "restricted" and not visibility_groups:
+        raise ValueError(
+            f"Navigation item {item_id} is restricted but has no visibilityGroups."
+        )
+
+    normalized: dict[str, Any] = {
+        "id": item_id,
+        "kind": kind,
+        "label": None,
+        "icon": None,
+        "targetType": None,
+        "target": None,
+        "visibilityMode": visibility_mode,
+        "visibilityGroups": visibility_groups,
+    }
+
+    if kind == "divider":
+        return normalized
+
+    label = str(item.get("label", "")).strip()
+    if not label:
+        raise ValueError(f"Navigation item {item_id} must have a label.")
+    normalized["label"] = label
+    if kind == "header":
+        return normalized
+
+    target_type = str(item.get("targetType", "")).strip().lower()
+    if target_type not in NAVIGATION_TARGET_TYPES:
+        raise ValueError(
+            f"Navigation link {item_id} has unsupported targetType: "
+            f"{target_type or '<empty>'}."
+        )
+    target = str(item.get("target", "")).strip()
+    if target_type == "page":
+        prefix = f"/{locale}/"
+        if not target.startswith(prefix):
+            raise ValueError(
+                f"Navigation page link {item_id} must target {prefix}<page-path>."
+            )
+        require_allowed_path(target[len(prefix) :])
+    elif target_type in {"external", "externalblank"}:
+        parsed_target = urlparse(target)
+        if parsed_target.scheme not in {"http", "https"} or not parsed_target.netloc:
+            raise ValueError(
+                f"Navigation link {item_id} must have an absolute HTTP(S) target."
+            )
+    elif target_type == "home":
+        target = ""
+
+    normalized.update(
+        {
+            "icon": str(item.get("icon") or "mdi-chevron-right").strip(),
+            "targetType": target_type,
+            "target": target,
+        }
+    )
+    return normalized
+
+
+def normalize_navigation_items(
+    items: list[dict[str, Any]], locale: str
+) -> list[dict[str, Any]]:
+    """Validate a complete locale navigation list and reject duplicate IDs."""
+    normalized = [normalize_navigation_item(item, locale) for item in items]
+    item_ids = [item["id"] for item in normalized]
+    if len(item_ids) != len(set(item_ids)):
+        raise ValueError("Navigation item IDs must be unique within a locale.")
+    return normalized
+
+
+def replace_navigation_tree(
+    trees: list[dict[str, Any]], locale: str, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Replace one locale tree while preserving every other locale."""
+    replaced = False
+    result: list[dict[str, Any]] = []
+    for tree in trees:
+        if tree.get("locale") == locale:
+            if replaced:
+                raise RuntimeError(
+                    f"Wiki.js returned duplicate navigation trees for {locale}."
+                )
+            result.append({"locale": locale, "items": items})
+            replaced = True
+        else:
+            result.append(tree)
+    if not replaced:
+        result.append({"locale": locale, "items": items})
+    return result
+
+
+@mcp.tool()
+async def wikijs_get_navigation(locale: str | None = None) -> dict[str, Any]:
+    """Read Wiki.js navigation mode and items, including a version for safe updates."""
+    state = await get_navigation_state()
+    selected_locale = locale or settings.WIKIJS_DEFAULT_LOCALE
+    tree = next(
+        (tree for tree in state["trees"] if tree.get("locale") == selected_locale),
+        {"locale": selected_locale, "items": []},
+    )
+    return {
+        "mode": state["mode"],
+        "tree": tree,
+        "version": navigation_version(state),
+    }
+
+
+@mcp.tool()
+async def wikijs_update_navigation(
+    items: list[dict[str, Any]],
+    expected_version: str,
+    locale: str | None = None,
+    mode: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Preview or replace one locale's navigation. Set dry_run=false after confirmation."""
+    selected_locale = (locale or settings.WIKIJS_DEFAULT_LOCALE).strip()
+    if not selected_locale:
+        raise ValueError("Navigation locale cannot be empty.")
+
+    current = await get_navigation_state()
+    current_version = navigation_version(current)
+    if current_version != expected_version:
+        raise RuntimeError(
+            "Navigation changed after it was read. Read it again before updating."
+        )
+
+    selected_mode = current["mode"] if mode is None else mode.strip().upper()
+    if selected_mode not in NAVIGATION_MODES:
+        raise ValueError(
+            f"Unsupported navigation mode: {selected_mode}. "
+            f"Use one of {sorted(NAVIGATION_MODES)}."
+        )
+
+    normalized_items = normalize_navigation_items(items, selected_locale)
+    proposed = {
+        "mode": selected_mode,
+        "trees": replace_navigation_tree(
+            current["trees"], selected_locale, normalized_items
+        ),
+    }
+    preview = {
+        "dryRun": dry_run,
+        "locale": selected_locale,
+        "modeBefore": current["mode"],
+        "modeAfter": selected_mode,
+        "itemCountBefore": len(
+            next(
+                (
+                    tree.get("items", [])
+                    for tree in current["trees"]
+                    if tree.get("locale") == selected_locale
+                ),
+                [],
+            )
+        ),
+        "itemCountAfter": len(normalized_items),
+        "items": normalized_items,
+        "currentVersion": current_version,
+        "proposedVersion": navigation_version(proposed),
+    }
+    if dry_run:
+        return preview
+
+    mutation = """
+    mutation($tree: [NavigationTreeInput]!, $mode: NavigationMode!) {
+      navigation {
+        updateTree(tree: $tree) {
+          responseResult { succeeded errorCode message }
+        }
+        updateConfig(mode: $mode) {
+          responseResult { succeeded errorCode message }
+        }
+      }
+    }
+    """
+    result = (
+        await wiki.request(
+            mutation,
+            {"tree": proposed["trees"], "mode": proposed["mode"]},
+        )
+    ).get("navigation", {})
+    tree_result = result.get("updateTree", {}).get("responseResult", {})
+    config_result = result.get("updateConfig", {}).get("responseResult", {})
+    if not tree_result.get("succeeded") or not config_result.get("succeeded"):
+        raise RuntimeError(
+            "Wiki.js navigation update failed. "
+            f"Tree: {tree_result.get('message', 'unknown error')}; "
+            f"Config: {config_result.get('message', 'unknown error')}"
+        )
+    return {**preview, "dryRun": False, "succeeded": True}
 
 
 async def get_page_by_path(path: str, locale: str | None = None) -> dict[str, Any]:
@@ -168,17 +432,20 @@ async def wikijs_search_pages(query: str) -> list[dict[str, Any]]:
     for metadata in await list_pages():
         page = await get_page_by_path(metadata["path"], metadata.get("locale"))
         haystack = "\n".join(
-            str(page.get(key, "")) for key in ("title", "path", "description", "content")
+            str(page.get(key, ""))
+            for key in ("title", "path", "description", "content")
         ).casefold()
         if term in haystack:
-            matches.append({
-                "id": page["id"],
-                "path": page["path"],
-                "title": page["title"],
-                "description": page.get("description", ""),
-                "locale": page.get("locale"),
-                "updatedAt": page.get("updatedAt"),
-            })
+            matches.append(
+                {
+                    "id": page["id"],
+                    "path": page["path"],
+                    "title": page["title"],
+                    "description": page.get("description", ""),
+                    "locale": page.get("locale"),
+                    "updatedAt": page.get("updatedAt"),
+                }
+            )
     return matches
 
 
@@ -245,10 +512,14 @@ async def wikijs_create_page(
         "tags": tags or [],
         "title": title,
     }
-    result = (await wiki.request(mutation, variables)).get("pages", {}).get("create", {})
+    result = (
+        (await wiki.request(mutation, variables)).get("pages", {}).get("create", {})
+    )
     response_result = result.get("responseResult", {})
     if not response_result.get("succeeded"):
-        raise RuntimeError(response_result.get("message", "Wiki.js page creation failed."))
+        raise RuntimeError(
+            response_result.get("message", "Wiki.js page creation failed.")
+        )
     return result.get("page", {})
 
 
@@ -290,7 +561,9 @@ async def wikijs_update_page(
     variables = {
         "id": current["id"],
         "content": content,
-        "description": current.get("description", "") if description is None else description,
+        "description": (
+            current.get("description", "") if description is None else description
+        ),
         "editor": "markdown",
         "isPrivate": current.get("isPrivate", True),
         "isPublished": current.get("isPublished", True),
@@ -301,10 +574,14 @@ async def wikijs_update_page(
         "tags": [item["tag"] for item in current.get("tags", [])],
         "title": current["title"] if title is None else title,
     }
-    result = (await wiki.request(mutation, variables)).get("pages", {}).get("update", {})
+    result = (
+        (await wiki.request(mutation, variables)).get("pages", {}).get("update", {})
+    )
     response_result = result.get("responseResult", {})
     if not response_result.get("succeeded"):
-        raise RuntimeError(response_result.get("message", "Wiki.js page update failed."))
+        raise RuntimeError(
+            response_result.get("message", "Wiki.js page update failed.")
+        )
     return result.get("page", {})
 
 
@@ -364,14 +641,12 @@ async def move_page_to_path(
         "tags": [item["tag"] for item in current.get("tags", [])],
         "title": current["title"],
     }
-    result = (await wiki.request(mutation, variables)).get("pages", {}).get(
-        "update", {}
+    result = (
+        (await wiki.request(mutation, variables)).get("pages", {}).get("update", {})
     )
     response_result = result.get("responseResult", {})
     if not response_result.get("succeeded"):
-        raise RuntimeError(
-            response_result.get("message", "Wiki.js page move failed.")
-        )
+        raise RuntimeError(response_result.get("message", "Wiki.js page move failed."))
     return result.get("page", {})
 
 
@@ -381,7 +656,7 @@ def destination_for_path(
     """Replace the source root of a page path with the destination root."""
     if page_path == source_path:
         return destination_path
-    return destination_path + page_path[len(source_path):]
+    return destination_path + page_path[len(source_path) :]
 
 
 async def plan_page_tree_move(
@@ -398,14 +673,11 @@ async def plan_page_tree_move(
         raise ValueError("A page tree cannot be moved inside itself.")
 
     all_pages = await list_pages()
-    locale_pages = [
-        page for page in all_pages if page.get("locale") == locale
-    ]
+    locale_pages = [page for page in all_pages if page.get("locale") == locale]
     moving = [
         page
         for page in locale_pages
-        if page.get("path") == source
-        or page.get("path", "").startswith(source + "/")
+        if page.get("path") == source or page.get("path", "").startswith(source + "/")
     ]
     if not moving:
         raise ValueError(f"No pages found at or below: {source}")
@@ -527,7 +799,7 @@ async def wikijs_move_page_tree(
         "dryRun": False,
         "moved": moved,
         "failed": failed,
-        "remaining": plan[len(moved) + len(failed):],
+        "remaining": plan[len(moved) + len(failed) :],
         "succeeded": not failed,
     }
 
